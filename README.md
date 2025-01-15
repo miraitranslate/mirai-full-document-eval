@@ -23,6 +23,8 @@ The dataset is licensed under CC-BY 4.0. While we strive to ensure the accuracy 
 
 Please also pay attention to the terms and conditions of each source website.
 
+The source code is licensed under MIT License.
+
 © 2024 Mirai Translate, Inc. 
 
 ## Statistics
