@@ -1,76 +1,95 @@
-import argparse
 import hashlib
-import os
 import re
-import sys
 import time
-import urllib
-
+import urllib.parse
+from pathlib import Path
+import click
 import requests
+from requests import Response
+from typing import Optional
+from re import Match
+from tqdm import tqdm
 
-parser=argparse.ArgumentParser()
-parser.add_argument('oldest_yearmonth', type=int)
-parser.add_argument('output_tsv')
-parser.add_argument('--html_directory', default='html')
-parser.add_argument('--base_uri', default='https://www.fsa.go.jp/')
-parser.add_argument('--index_uri', default='https://www.fsa.go.jp/en/news/index.html')
-parser.add_argument('--index_file', default='index.html')
-parser.add_argument('--delay', type=float, default=1.0)
-args=parser.parse_args()
+DOC_ID_PREFIX: str = 'fsa_'
+DEFAULT_HTML_DIR: str = 'html'
+DEFAULT_BASE_URI: str = 'https://www.fsa.go.jp/'
+DEFAULT_INDEX_URI: str = 'https://www.fsa.go.jp/en/news/index.html'
+DEFAULT_INDEX_FILE: str = 'index.html'
+DEFAULT_DELAY: float = 1.0
 
-oldest_yearmonth=args.oldest_yearmonth
-output_tsv=args.output_tsv
-html_directory=args.html_directory
-base_uri=args.base_uri
-index_uri=args.index_uri
-index_file=args.index_file
-delay=args.delay
 
-DOCIDPREFIX='fsa_'
-
-if not os.path.exists(index_file):
-    response = requests.get(index_uri)
+def download_file(url: str, destination: Path, delay: float) -> None:
+    """指定URLからコンテンツを取得し、ファイルへ保存する。"""
+    response: Response = requests.get(url)
     response.encoding = response.apparent_encoding
-    # ダウンロードをやり直したくないので書き出す
-    with open(index_file, 'w', encoding='utf-8') as f:
+    # 再ダウンロードを避けるため、取得結果をファイルへ書き出す
+    with open(destination, 'w', encoding='utf-8') as f:
         f.write(response.text)
-        print(f'Saved to {index_file}', file=sys.stderr)
+    tqdm.write(f'Saved to {destination}')
+    time.sleep(delay)
 
-tsv=[]
-with open('index.html', encoding='utf-8') as f:
-    for line in f:
-        m = re.search(r'<a href="(.+?)"', line)
-        if m:
-            en_uri=urllib.parse.urljoin(base_uri, m.group(1))
-            doc_id=DOCIDPREFIX+hashlib.md5(en_uri.encode()).hexdigest()[:8]
-            yearmonth_exists=re.search(r'(20\d{6})(-\d+)?.html', en_uri)
-            if yearmonth_exists:
-                yearmonth=int(yearmonth_exists.group(1)[:6])
-                if yearmonth>=oldest_yearmonth:
-                    print(f'Extracted: {en_uri}', file=sys.stderr)
-                    en_filename=os.path.join(html_directory, en_uri.split('/')[-1].split('.')[0]+'.en')
-                    ja_filename=os.path.join(html_directory, en_uri.split('/')[-1].split('.')[0]+'.ja')
-                    if not os.path.exists(en_filename):
-                        response = requests.get(en_uri)
-                        response.encoding = response.apparent_encoding
-                        with open(en_filename, 'w', encoding='utf-8') as f:
-                            f.write(response.text)
-                            print(f'Saved to {en_filename}', file=sys.stderr)
-                    with open(en_filename) as f:
-                        for line in f:
-                            m = re.search(r'<a target="_blank" href="(.+?)">Japanese(<img.+?)?</a>', line) # relative uri
-                            if m:
-                                ja_uri=urllib.parse.urljoin(base_uri, m.group(1))
-                                print(f'Extracted: {ja_uri}', file=sys.stderr)
-                                if not os.path.exists(ja_filename):
-                                    response = requests.get(ja_uri)
-                                    response.encoding = response.apparent_encoding
-                                    with open(ja_filename, 'w', encoding='utf-8') as f:
-                                        f.write(response.text)
-                                        print(f'Saved to {ja_filename}', file=sys.stderr)
-                                    time.sleep(delay)
-                                    tsv.append("\t".join([doc_id, os.path.basename(ja_filename), os.path.basename(en_filename), ja_uri, en_uri]))
+
+def count_lines(filename: Path, encoding: str ='utf-8') -> int:
+    with open(filename, 'r', encoding=encoding) as f:
+        return sum(1 for _ in f)
+
+
+@click.command()
+@click.argument('oldest_yearmonth', type=int)
+@click.argument('output_tsv', type=click.Path(writable=True, path_type=Path))
+@click.option('--html_directory', default=DEFAULT_HTML_DIR, type=click.Path(file_okay=False, path_type=Path))
+@click.option('--base_uri', default=DEFAULT_BASE_URI, type=str)
+@click.option('--index_uri', default=DEFAULT_INDEX_URI, type=str)
+@click.option('--index_file', default=DEFAULT_INDEX_FILE, type=click.Path(path_type=Path))
+@click.option('--delay', default=DEFAULT_DELAY, type=float)
+def main(oldest_yearmonth: int, output_tsv: Path, html_directory: Path, base_uri: str, index_uri: str, index_file: Path, delay: float) -> None:
+    """
+    指定された年月（oldest_yearmonth 以上）より新しい文書のリンクをスクレイピングし、
+    TSV 形式で出力する。
+    """
+    # HTML を保存するディレクトリがなければ作成
+    html_directory.mkdir(parents=True, exist_ok=True)
+
+    # インデックスファイルが存在しなければダウンロード
+    if not index_file.exists():
+        download_file(index_uri, index_file, delay)
+
+    total_lines: int = count_lines(index_file)
+    tsv_entries: list[str] = []
+    with open(index_file, 'r', encoding='utf-8') as f:
+        for line in tqdm(f, total=total_lines):
+            match: Optional[Match[str]] = re.search(r'<a href="(.+?)"', line)
+
+            if match:
+                en_uri: str = urllib.parse.urljoin(base_uri, match.group(1))
+                doc_id: str = DOC_ID_PREFIX + hashlib.md5(en_uri.encode()).hexdigest()[:8]
+                yearmonth_match: Optional[Match[str]] = re.search(r'(20\d{6})(-\d+)?\.html', en_uri)
+
+                if yearmonth_match:
+                    yearmonth: int = int(yearmonth_match.group(1)[:6])
+                    if yearmonth >= oldest_yearmonth:
+                        tqdm.write(f'English Link Extracted: {en_uri}')
+                        base_filename: str = Path(en_uri).stem
+                        en_file: Path = html_directory / f'{base_filename}.en'
+                        ja_file: Path = html_directory / f'{base_filename}.ja'
+                        if not en_file.exists():
+                            download_file(en_uri, en_file, delay)
+
+                        with open(en_file, encoding='utf-8') as f:
+                            for line in f:
+                                ja_match: Optional[Match[str]] = re.search(r'<a target="_blank" href="(.+?)">Japanese(<img.+?)?</a>', line) # relative uri
+                                if ja_match:
+                                    ja_uri: str = urllib.parse.urljoin(base_uri, ja_match.group(1))
+                                    tqdm.write(f'Japanese Link Extracted: {ja_uri}')
+                                    if not ja_file.exists():
+                                        download_file(ja_uri, ja_file, delay)
+                                        tsv_entries.append(f"{doc_id}\t{ja_file.name}\t{en_file.name}\t{ja_uri}\t{en_uri}")
                                     break
-with open(output_tsv, 'w') as f:
-    print('doc_id\tja_filename\ten_filename\tja_uri\ten_uri', file=f)
-    f.write('\n'.join(tsv))
+
+    with output_tsv.open('w', encoding='utf-8') as f:
+        f.write('doc_id\tja_filename\ten_filename\tja_uri\ten_uri\n')
+        f.write('\n'.join(tsv_entries))
+
+
+if __name__ == '__main__':
+    main()
