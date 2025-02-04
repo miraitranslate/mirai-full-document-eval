@@ -1,0 +1,11 @@
+*.html
+*.html.*
+*.tsv
+*.json
+*.txt
+.venv
+*.en
+*.ja
+.DS_Store
+# ただし、data.json は無視しない
+!data.json

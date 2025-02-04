@@ -1,0 +1,14 @@
+[project]
+name = "mirai-full-document-eval"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "bs4>=0.0.2",
+    "click>=8.1.8",
+    "datetime>=5.5",
+    "pydantic>=2.10.5",
+    "requests>=2.32.3",
+    "tqdm>=4.67.1",
+]
