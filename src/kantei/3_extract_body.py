@@ -1,196 +1,210 @@
-import argparse
 import datetime
-import glob
 import hashlib
 import json
-import os
 import re
+from re import Match, Pattern
+from typing import Optional
 import sys
 import time
-
-from bs4 import BeautifulSoup
+from pathlib import Path
+import click
 import requests
+from tqdm import tqdm
+from bs4 import BeautifulSoup, Tag, NavigableString
 from urllib.parse import urljoin
 
-BASE_JA_URI='https://www.kantei.go.jp/'
-BASE_EN_URI='https://japan.kantei.go.jp/'
-RE_URI=re.compile('www.kantei.go.jp/jp/')
+BASE_JA_URI: str = 'https://www.kantei.go.jp/'
+BASE_EN_URI: str = 'https://japan.kantei.go.jp/'
+RE_URI: Pattern[str] = re.compile('www.kantei.go.jp/jp/')
+HTML_TAG = Tag | NavigableString
 
-def get_body_en(soup, v):
-    if v=='new':
-        # First, extract the div with the class "section" and "has-detail-more"
-        div=soup.find('div', class_='section has-detail-more')
-    elif v=='old':
-        # First, extract the div with the id "format"
-        div=soup.find('div', id='format')
+
+def remove_empty_paragraphs(paragraphs: list[str]) -> list[str]:
+    return [para.strip() for para in paragraphs if para.strip() != '']
+
+
+def is_num_newlines(paragraphs0: list[str], paragraphs1: list[str]) -> bool:
+    return all(p0.count('\n') == p1.count('\n') for p0, p1 in zip(paragraphs0, paragraphs1))
+
+
+def get_body_en(soup: BeautifulSoup, version: str) -> Optional[list[str]]:
+    if version not in ['new', 'old']:
+        raise ValueError(f'Invalid version: {version}. Must be "new" or "old".')
+
+    if version == 'new':
+        div = soup.find('div', class_='section has-detail-more')
     else:
-        sys.exit('Error: version is neither "new" nor "old"')
+        div = soup.find('div', id='format')
+
     if div is None:
         return None
-    # Then, remove the div with the class "aly_tx_right" if it EXISTS
-    div_aly_tx_right=div.find('div', class_='aly_tx_right')
-    if div_aly_tx_right:
-        div_aly_tx_right.decompose()
-    # If it exists, remove p aligned right
+
+    aly_div = div.find('div', class_='aly_tx_right')
+    if aly_div:
+        aly_div.decompose()
+
     for p in div.find_all('p', align='right'):
         p.decompose()
-    # if button exists, remove it
+
     for button in div.find_all('button'):
         button.decompose()
-    text=div.get_text()
-    text=text.strip()
-    text=text.replace('\xc2\xa0', ' ')
-    text=re.sub(r'\n\s+\n', '\n\n', text)
-    paragraphs=text.split('\n\n')
-    paragraphs=remove_empty_paragraphs(paragraphs)
-    return paragraphs
 
-def get_self_URI(soup, v):
-    a=soup.find('meta', property='og:url')
-    if a:
-        return a.get('content', None)
+    text: str = div.get_text().strip().replace('\xc2\xa0', ' ')
+    text = re.sub(r'\n\s+\n', '\n\n', text)
+    return remove_empty_paragraphs(text.split('\n\n'))
+
+
+def get_self_uri(soup: BeautifulSoup) -> Optional[str]:
+    meta_tag = soup.find('meta', property='og:url')
+    return meta_tag.get('content') if meta_tag else None
+
+
+def get_japanese_uri(soup: BeautifulSoup) -> Optional[str]:
+    link = soup.find('a', href=RE_URI)
+    if link:
+        uri = link['href']
+        if not uri.startswith('http'):
+            return urljoin(BASE_JA_URI, uri)
+        return uri
     return None
 
-def get_japanese_URI(soup, v):
-    # Extract URI in href in <a>, which contains "www.kantei.go.jp/jp/"
-    a=soup.find('a', href=RE_URI)
-    if a is None:
-        return None
-    URI=a['href']
-    # if the URI is relative, convert it to absolute
-    if not URI.startswith('http'):
-        URI=urljoin(BASE_JA_URI, URI)
-    return URI
 
-def get_body_ja(soup):
-    div=soup.find('div', class_='section')
+def get_body_ja(soup: BeautifulSoup) -> Optional[list[str]]:
+    div: Optional[HTML_TAG] = soup.find('div', class_='section')
     if div is None:
         return None
-    paragraphs=[]
+
+    paragraphs: list[str] = []
     for p in div.find_all('p'):
-        text=p.get_text().strip().replace('\t', '')
-        # there are sometimes paragraphs separated by "\n　"
-        paragraphs_in_paragraph=text.split('\n　')
-        paragraphs_in_paragraph=remove_empty_paragraphs(paragraphs_in_paragraph)
+        text: str = p.get_text().strip().replace('\t', '')
+        paragraphs_in_paragraph = remove_empty_paragraphs(text.split('\n　'))
         paragraphs.extend(paragraphs_in_paragraph)
     return paragraphs
 
-def get_date_ja(soup):
-    # get the span with the class "date"
-    span=soup.find('span', class_='date')
-    str_date=span.get_text()
-    return convert_str_date_into_datetime(str_date)
 
-def convert_str_date_into_datetime(str_date):
-    # extract date in Japanese format
-    match=re.search(r'(平成|令和)(\d{1,2}|元)年(\d{1,2})月(\d{1,2})日', str_date)
-    if match:
-        era=match.group(1)
-        year=int(match.group(2) if match.group(2)!='元' else 1)
-        month=int(match.group(3))
-        day=int(match.group(4))
-        if era=='平成':
-            year+=1988
-        elif era=='令和':
-            year+=2018
-        return datetime.date(year, month, day)
-    else:
+def get_date_ja(soup: BeautifulSoup) -> Optional[str]:
+    span: Optional[HTML_TAG] = soup.find('span', class_='date')
+    if not span:
         return None
 
-def get_version(soup):
-    # if div with the id "top" exists, it is "new" version; if "header" exists, it is "old" version
-    if soup.find('div', id='top'):
-        return 'new'
-    else:
-        return 'old'
+    dt = convert_str_date_into_datetime(span.get_text())
+    if dt:
+        return dt.isoformat()
+    return None
 
-def download_and_save_html(url, output_path):
-    response=requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 12.0; Win32; x86) AppleWebKit/934.78 (KHTML, like Gecko) Chrome/315.0.0.0 Safari/779.68 Edge/43.29855'})
-    response.encoding=response.apparent_encoding
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(response.text)
 
-def remove_empty_paragraphs(list_para):
-    return [para.strip() for para in list_para if para.strip()!='']
-
-def check_num_newlines(paragraphs0, paragraphs1):
-    # Count the number of lines in each paragraph.
-    # If in one paragraph the number of lines is different from the other, return False.
-    for p0, p1 in zip(paragraphs0, paragraphs1):
-        if p0.count('\n') != p1.count('\n'):
-            return False
-    return True
-
-def generate_uid(URI):
-    return hashlib.md5(URI.encode()).hexdigest()[:8]
-
-def main(args):
-    en_directory=args.en_directory
-    ja_directory=args.ja_directory
-    output_json=args.output_json
-    all_data=[]
-    
-    path_list=glob.glob(os.path.join(en_directory, '*'))
-    N=len(path_list)
-    c=0
-    IDs={}
-    for en_path in path_list:
-        c+=1
-        print(f'({c}/{N}); 処理開始 {en_path}', flush=True, file=sys.stderr)
-        uid=f'kantei_{generate_uid(en_path)}'
-        if uid in IDs:
-            sys.exit(f'Error: 重複したID: {uid}')
-        IDs[uid]=1
-        data={
-            'id': uid, # 8文字のハッシュ値
-            'en_URI': None,
-            'ja_URI': None,
-            'en_body': None,
-            'ja_body': None,
-            'ja_date': None 
-        }
-        soup=BeautifulSoup(open(en_path), 'html.parser')
-        template_version=get_version(soup)
-        data['en_URI']=get_self_URI(soup, template_version)
-        data['en_body']=get_body_en(soup, template_version)
-        data['ja_URI']=get_japanese_URI(soup, template_version)
-        
-        # skip if either en_URI, ja_URI or en_body is None:
-        if data['en_URI'] is None or data['ja_URI'] is None or data['en_body'] is None:
-            print(f'en_URI, ja_URI, en_bodyのいずれかがNone: {en_path}')
-            continue
-        # download the Japanese page
-        ja_basename=data['en_URI'].replace(BASE_EN_URI, '').replace('/', '--').replace('.html', '')
-        ja_path=os.path.join(ja_directory, ja_basename+'.html')
-        # if it already exists, skip
-        if os.path.exists(ja_path):
-            pass
+def convert_str_date_into_datetime(str_date: str) -> Optional[datetime.date]:
+    match: Optional[Match[str]] = re.search(r'(平成|令和)(\d{1,2}|元)年(\d{1,2})月(\d{1,2})日', str_date)
+    if match:
+        era, year, month, day = match.groups()
+        if era == '平成':
+            base_year = 1988
         else:
-            print(f'ダウンロードする: {ja_path}')
-            download_and_save_html(data['ja_URI'], ja_path)
-            time.sleep(1)
-        ja_soup=BeautifulSoup(open(ja_path), 'html.parser')
-        data['ja_body']=get_body_ja(ja_soup)
-        if data['ja_body'] is None:
-            print(f'Error: ja_bodyがNone: {ja_path}', file=sys.stderr)
-            continue
-        data['ja_date']=get_date_ja(ja_soup).isoformat()
-        if len(data['en_body'])!=len(data['ja_body']):
-            print(f'段落数不一致：{en_path} と {ja_path}', file=sys.stderr)
-            continue
-        if not check_num_newlines(data['en_body'], data['ja_body']):
-            print('改行数不一致: ', en_path, file=sys.stderr)
-            continue
-        all_data.append(data)
-    with open(output_json, 'w') as f:
-        json.dump(all_data, f, ensure_ascii=False, indent="\t")
-    # print the number of data
-    print(len(all_data), file=sys.stderr)
+            base_year = 2018
 
-if __name__=='__main__':
-    parser=argparse.ArgumentParser()
-    parser.add_argument('en_directory')
-    parser.add_argument('ja_directory')
-    parser.add_argument('output_json')
-    args=parser.parse_args()
+        if year == '元':
+            year_num = base_year + 1
+        else:
+            year_num = base_year + int(year)
+
+        return datetime.date(year_num, int(month), int(day))
+    return None
+
+
+def get_version(soup: BeautifulSoup) -> str:
+    return 'new' if soup.find('div', id='top') else 'old'
+
+
+def download_and_save_html(url: str, output_path: Path) -> None:
+    response = requests.get(
+        url,
+        headers={
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 12.0; Win32; x86) '
+                'AppleWebKit/934.78 (KHTML, like Gecko) '
+                'Chrome/315.0.0.0 Safari/779.68 Edge/43.29855'
+            )
+        }
+    )
+    response.encoding = response.apparent_encoding
+    output_path.write_text(response.text, encoding='utf-8')
+
+
+def generate_uid(uri: str) -> str:
+    return hashlib.md5(uri.encode()).hexdigest()[:8]
+
+
+@click.command()
+@click.argument('en_directory', type=click.Path(exists=True, path_type=Path))
+@click.argument('ja_directory', type=click.Path(file_okay=False, path_type=Path))
+@click.argument('output_json', type=click.Path(writable=True, path_type=Path))
+def main(en_directory: Path, ja_directory: Path, output_json: Path) -> None:
+    all_data: list[dict[str, Optional[str] | Optional[list[str]]]] = []
+    ids: set[str] = set()
+
+    file_list = list(en_directory.glob('*'))
+    total_files = len(file_list)
+
+    for i, en_path in enumerate(tqdm(file_list, total=total_files, desc='Processing files', dynamic_ncols=True), start=1):
+        uid = f'kantei_{generate_uid(str(en_path))}'
+        if uid in ids:
+            tqdm.write(f'Error: 重複したID: {uid}')
+            sys.exit(1)
+        ids.add(uid)
+
+        soup: BeautifulSoup = BeautifulSoup(en_path.read_text(encoding='utf-8'), 'html.parser')
+        version: str = get_version(soup)
+        en_uri: Optional[str] = get_self_uri(soup)
+        en_body: Optional[list[str]] = get_body_en(soup, version)
+        ja_uri: Optional[str] = get_japanese_uri(soup)
+
+        # 途中で情報が足りない場合はスキップ
+        if not all([en_uri, ja_uri, en_body]):
+            tqdm.write(f'[{i}/{total_files}] en_URI, ja_URI, en_bodyのいずれかがNone: {en_path}')
+            continue
+
+        ja_basename: str = en_uri.replace(BASE_EN_URI, '').replace('/', '--').replace('.html', '')
+        ja_path: Path = ja_directory / f'{ja_basename}.html'
+
+        if not ja_path.exists():
+            tqdm.write(f'[{i}/{total_files}] ダウンロードする: {ja_path}')
+            download_and_save_html(ja_uri, ja_path)
+            time.sleep(1)
+
+        ja_soup: BeautifulSoup = BeautifulSoup(ja_path.read_text(encoding='utf-8'), 'html.parser')
+        ja_body: Optional[list[str]] = get_body_ja(ja_soup)
+        ja_date: Optional[str] = get_date_ja(ja_soup)
+
+        # 元のコード同様、日付が取れない場合もスキップ
+        if ja_body is None or ja_date is None:
+            tqdm.write(f'[{i}/{total_files}] Error: ja_bodyまたはja_dateがNone: {ja_path}')
+            continue
+
+        # 段落数が一致しなかったらスキップ
+        if len(en_body) != len(ja_body):
+            tqdm.write(f'[{i}/{total_files}] 段落数不一致: {en_path} と {ja_path}')
+            continue
+
+        # 改行数が一致しなかったらスキップ
+        if not is_num_newlines(en_body, ja_body):
+            tqdm.write(f'[{i}/{total_files}] 改行数不一致: {en_path}')
+            continue
+
+        # 問題なければデータに追加
+        all_data.append({
+            'id': uid,
+            'en_URI': en_uri,
+            'ja_URI': ja_uri,
+            'en_body': en_body,
+            'ja_body': ja_body,
+            'ja_date': ja_date
+        })
+
+    with output_json.open('w', encoding='utf-8') as f:
+        json.dump(all_data, f, ensure_ascii=False, indent="\t")
+
+    tqdm.write(f'処理済みデータ数: {len(all_data)}')
+
+
+if __name__ == '__main__':
     main()
