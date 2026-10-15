@@ -4,7 +4,6 @@ import json
 import re
 from re import Match, Pattern
 from typing import Optional
-import sys
 import time
 from pathlib import Path
 import click
@@ -15,7 +14,8 @@ from urllib.parse import urljoin
 
 BASE_JA_URI: str = 'https://www.kantei.go.jp/'
 BASE_EN_URI: str = 'https://japan.kantei.go.jp/'
-RE_URI: Pattern[str] = re.compile('www.kantei.go.jp/jp/')
+RE_URI: Pattern[str] = re.compile(r'//(?:www\.)?kantei\.go\.jp/jp/')
+RE_BARE_JA_HOST: Pattern[str] = re.compile(r'^https?://kantei\.go\.jp/')
 HTML_TAG = Tag | NavigableString
 
 
@@ -27,29 +27,77 @@ def is_num_newlines(paragraphs0: list[str], paragraphs1: list[str]) -> bool:
     return all(p0.count('\n') == p1.count('\n') for p0, p1 in zip(paragraphs0, paragraphs1))
 
 
+NEW_CONTAINER_CLASSES: tuple[str, ...] = ('section', 'article-content')
+PARAGRAPH_BLOCK_CLASSES: tuple[str, ...] = ('m_text', 'en_t')
+RE_PROVISIONAL: Pattern[str] = re.compile(r'^\[?\s*provisional\s+translation\s*\]?\.?$', re.IGNORECASE)
+
+
+def _find_container_new(soup: BeautifulSoup) -> Optional[Tag]:
+    for cls in NEW_CONTAINER_CLASSES:
+        div = soup.find('div', class_=cls)
+        if isinstance(div, Tag):
+            return div
+    return None
+
+
+def _strip_boilerplate(div: Tag) -> None:
+    for e in div.find_all('div', class_='aly_tx_right'):
+        e.decompose()
+    for e in div.find_all(class_='p_right'):
+        e.decompose()
+    for e in div.find_all('p', align='right'):
+        e.decompose()
+    for e in div.find_all('p', style=re.compile(r'text-align\s*:\s*right')):
+        e.decompose()
+    for e in div.find_all(['button', 'style', 'script']):
+        e.decompose()
+
+
+def _paragraph_blocks(div: Tag) -> list[Tag]:
+    blocks: list[Tag] = []
+    for el in div.find_all(['p', 'div']):
+        if el.name == 'div' and not set(el.get('class') or []) & set(PARAGRAPH_BLOCK_CLASSES):
+            continue
+        if el.find_parent('p') is not None:
+            continue
+        if el.find_parent('div', class_=list(PARAGRAPH_BLOCK_CLASSES)) is not None:
+            continue
+        blocks.append(el)
+    return blocks
+
+
+def is_only_provisional_marker(paragraphs: Optional[list[str]]) -> bool:
+    return bool(paragraphs) and all(RE_PROVISIONAL.match(p.strip()) for p in paragraphs)
+
+
 def get_body_en(soup: BeautifulSoup, version: str) -> Optional[list[str]]:
     if version not in ['new', 'old']:
         raise ValueError(f'Invalid version: {version}. Must be "new" or "old".')
 
-    if version == 'new':
-        div = soup.find('div', class_='section has-detail-more')
-    else:
-        div = soup.find('div', id='format')
-
-    if div is None:
+    div = _find_container_new(soup) if version == 'new' else soup.find('div', id='format')
+    if not isinstance(div, Tag):
         return None
 
-    aly_div = div.find('div', class_='aly_tx_right')
-    if aly_div:
-        aly_div.decompose()
+    _strip_boilerplate(div)
 
-    for p in div.find_all('p', align='right'):
-        p.decompose()
+    if version == 'new':
+        blocks = _paragraph_blocks(div)
+        if blocks:
+            paragraphs: list[str] = []
+            for block in blocks:
+                paragraphs.extend(_split_paragraphs(block.get_text()))
+            return paragraphs
 
-    for button in div.find_all('button'):
-        button.decompose()
+    paragraphs = _split_paragraphs(div.get_text())
+    if version == 'new' and len(paragraphs) > 1 and RE_PROVISIONAL.match(paragraphs[0]):
+        paragraphs = paragraphs[1:]
+    return paragraphs
 
-    text: str = div.get_text().strip().replace('\xc2\xa0', ' ')
+
+def _split_paragraphs(raw: str) -> list[str]:
+    # nbsp (U+00A0) を半角スペースへ。デコード済み文字列では 1 文字 '\xa0'。
+    # 旧実装の '\xc2\xa0' は UTF-8 バイト列のリテラル（2 文字）で正常文字列に一致せず no-op だった。
+    text: str = raw.strip().replace('\xa0', ' ')
     text = re.sub(r'\n\s+\n', '\n\n', text)
     return remove_empty_paragraphs(text.split('\n\n'))
 
@@ -64,26 +112,33 @@ def get_japanese_uri(soup: BeautifulSoup) -> Optional[str]:
     if link:
         uri = link['href']
         if not uri.startswith('http'):
-            return urljoin(BASE_JA_URI, uri)
-        return uri
+            uri = urljoin(BASE_JA_URI, uri)
+        return RE_BARE_JA_HOST.sub(BASE_JA_URI, uri)
     return None
 
 
 def get_body_ja(soup: BeautifulSoup) -> Optional[list[str]]:
-    div: Optional[HTML_TAG] = soup.find('div', class_='section')
+    div = _find_container_new(soup)
     if div is None:
         return None
+    _strip_boilerplate(div)
+
+    for br in div.find_all('br'):
+        following = br.next_sibling
+        if not (isinstance(following, NavigableString) and str(following).startswith('\n')):
+            br.replace_with('\n')
 
     paragraphs: list[str] = []
-    for p in div.find_all('p'):
-        text: str = p.get_text().strip().replace('\t', '')
-        paragraphs_in_paragraph = remove_empty_paragraphs(text.split('\n　'))
-        paragraphs.extend(paragraphs_in_paragraph)
+    for block in _paragraph_blocks(div):
+        text: str = block.get_text().strip().replace('\t', '')
+        paragraphs.extend(remove_empty_paragraphs(text.split('\n　')))
     return paragraphs
 
 
 def get_date_ja(soup: BeautifulSoup) -> Optional[str]:
     span: Optional[HTML_TAG] = soup.find('span', class_='date')
+    if not span:
+        span = soup.select_one('.article-date time') or soup.find(class_='article-date')
     if not span:
         return None
 
@@ -124,7 +179,8 @@ def download_and_save_html(url: str, output_path: Path) -> None:
                 'AppleWebKit/934.78 (KHTML, like Gecko) '
                 'Chrome/315.0.0.0 Safari/779.68 Edge/43.29855'
             )
-        }
+        },
+        timeout=30,
     )
     response.encoding = response.apparent_encoding
     output_path.write_text(response.text, encoding='utf-8')
@@ -138,30 +194,44 @@ def generate_uid(uri: str) -> str:
 @click.argument('en_directory', type=click.Path(exists=True, path_type=Path))
 @click.argument('ja_directory', type=click.Path(file_okay=False, path_type=Path))
 @click.argument('output_json', type=click.Path(writable=True, path_type=Path))
-def main(en_directory: Path, ja_directory: Path, output_json: Path) -> None:
+@click.option('--uris', 'uris_file', type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="この一覧（1 行 1 URI）にある記事だけを抽出する")
+def main(en_directory: Path, ja_directory: Path, output_json: Path, uris_file: Optional[Path]) -> None:
     all_data: list[dict[str, Optional[str] | Optional[list[str]]]] = []
     ids: set[str] = set()
+
+    wanted: Optional[set[str]] = None
+    if uris_file is not None:
+        wanted = {line.strip() for line in uris_file.read_text(encoding='utf-8').splitlines() if line.strip()}
 
     file_list = list(en_directory.glob('*'))
     total_files = len(file_list)
 
     for i, en_path in enumerate(tqdm(file_list, total=total_files, desc='Processing files', dynamic_ncols=True), start=1):
-        uid = f'kantei_{generate_uid(str(en_path))}'
-        if uid in ids:
-            tqdm.write(f'Error: 重複したID: {uid}')
-            sys.exit(1)
-        ids.add(uid)
-
         soup: BeautifulSoup = BeautifulSoup(en_path.read_text(encoding='utf-8'), 'html.parser')
         version: str = get_version(soup)
         en_uri: Optional[str] = get_self_uri(soup)
+        if wanted is not None and en_uri not in wanted:
+            continue
         en_body: Optional[list[str]] = get_body_en(soup, version)
+        if is_only_provisional_marker(en_body):
+            tqdm.write(f'[{i}/{total_files}] en_body が [Provisional translation] のみ: {en_path}')
+            en_body = None
         ja_uri: Optional[str] = get_japanese_uri(soup)
 
         # 途中で情報が足りない場合はスキップ
         if not all([en_uri, ja_uri, en_body]):
             tqdm.write(f'[{i}/{total_files}] en_URI, ja_URI, en_bodyのいずれかがNone: {en_path}')
             continue
+
+        # id は en_URI から生成する（ファイル名だけだと別文書で衝突しうるため）。
+        uid = f'kantei_{generate_uid(en_uri)}'
+        if uid in ids:
+            # 同一 en_URI の重複は当該文書だけスキップする（他の異常系と同じ）。
+            # 全停止 (sys.exit) すると重複 1 件で kantei 抽出が丸ごと落ち、
+            # 無人月次が止まるため。集約側でも id 主キーで重複排除される。
+            tqdm.write(f'[{i}/{total_files}] 重複IDをスキップ: {uid}')
+            continue
+        ids.add(uid)
 
         ja_basename: str = en_uri.replace(BASE_EN_URI, '').replace('/', '--').replace('.html', '')
         ja_path: Path = ja_directory / f'{ja_basename}.html'

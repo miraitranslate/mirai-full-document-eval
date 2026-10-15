@@ -73,7 +73,10 @@ def main(input_tsv: Path, output_json: Path, html_directory: Path) -> None:
             if en_uri in existing:
                 continue
             existing.add(en_uri)
-            id = id.replace('mf_', 'mof_')  # 歴史的経緯
+            id = id.replace('mf_', 'mof_')
+            # id を mof_<hash> 形式に統一する（prefix 無しで渡る場合に補う）。
+            if not id.startswith('mof_'):
+                id = f'mof_{id}'
             metadata.append({
                 'id': id,
                 'ja_file': ja_file,
@@ -111,6 +114,10 @@ def main(input_tsv: Path, output_json: Path, html_directory: Path) -> None:
             continue
 
         ja_date: str = extract_date(ja_soup)
+        # 日付が取れないレコードはスキップする（fsa/kantei と統一）。
+        if not ja_date:
+            click.echo(f"日付抽出失敗 (skip): {item['id']}", err=True)
+            continue
 
         data.append({
             'id': item['id'],

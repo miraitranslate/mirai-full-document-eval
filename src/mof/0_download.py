@@ -49,7 +49,7 @@ def main(from_yearmonth: str, to_yearmonth: str, output_tsv: Path, html_dir: Pat
     # Download index files
     for yearmonth in tqdm(yearmonths, desc='Downloading index files', total=len(yearmonths)):
         index_uri: str = index_uri_template.format(yearmonth=yearmonth)
-        response: Response = requests.get(index_uri)
+        response: Response = requests.get(index_uri, timeout=30)
         response.encoding = response.apparent_encoding
         index_path: Path = html_dir / f'index_{yearmonth}.html'
         index_path.write_text(response.text, encoding='utf-8')
@@ -82,7 +82,7 @@ def main(from_yearmonth: str, to_yearmonth: str, output_tsv: Path, html_dir: Pat
                 tqdm.write(f"Processing English URI: {en_uri}")
 
                 en_file: Path = html_dir / f'mof_{doc_id}.en.html'
-                en_response: Response = requests.get(en_uri)
+                en_response: Response = requests.get(en_uri, timeout=30)
                 en_response.encoding = en_response.apparent_encoding
                 en_file.write_text(en_response.text, encoding='utf-8')
 
@@ -96,7 +96,7 @@ def main(from_yearmonth: str, to_yearmonth: str, output_tsv: Path, html_dir: Pat
                         tqdm.write(f"Processing Japanese URI: {ja_uri}")
 
                         ja_file: Path = html_dir / f'mof_{doc_id}.ja.html'
-                        ja_response: Response = requests.get(ja_uri)
+                        ja_response: Response = requests.get(ja_uri, timeout=30)
                         ja_response.encoding = ja_response.apparent_encoding
                         ja_file.write_text(ja_response.text, encoding='utf-8')
 

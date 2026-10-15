@@ -27,9 +27,23 @@ The source code is licensed under MIT License.
 
 © 2024 Mirai Translate, Inc. 
 
+## ID Scheme Change (v0 → v1)
+
+Record `id`s are now derived deterministically from `en_URI` as `<site>_<md5(en_URI)[:8]>`
+(records also carry `_schema_version: 1`). Previously, ids mixed sequential numbers and
+path-based hashes, which were not reproducible across re-scrapes and contained 11 colliding
+pairs; they could not serve as a stable primary key. About 96% of ids changed as a result.
+
+If you have data keyed by the old ids, a one-time mapping table
+(`old_id`, `new_id`, `en_URI`) is attached to the corresponding GitHub Release
+(`data-v*` tag). `en_URI` is stable across both schemes and can also be used to join old
+and new records directly.
+
 ## Statistics
 
 Number of documents per month and number of paragraphs.
+
+<!-- STATS:START -->
 
 |-|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19|20|
 |-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|
@@ -196,4 +210,18 @@ Number of documents per month and number of paragraphs.
 |202505|12|22|0|3|0|0|0|1|1|0|1|0|0|1|0|0|0|0|0|0|
 |202506|2|12|3|2|2|2|0|3|1|1|0|0|0|0|1|0|0|0|0|0|
 |202507|8|6|6|2|2|1|1|1|0|0|0|0|0|0|0|0|0|0|0|0|
-|202508|0|1|1|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|
+|202508|13|11|8|3|5|0|2|0|2|2|0|0|0|0|0|0|0|0|0|0|
+|202509|23|21|3|3|0|3|1|0|1|0|0|1|1|0|1|0|0|0|0|0|
+|202510|24|6|6|5|0|0|5|0|1|1|0|0|0|0|0|0|0|0|0|0|
+|202511|15|10|3|2|0|0|2|1|1|1|2|1|0|0|0|0|0|0|0|1|
+|202512|12|7|3|3|1|0|1|0|1|0|0|0|0|0|0|0|0|0|0|0|
+|202601|13|3|1|4|0|1|0|0|0|0|1|1|0|0|0|0|1|0|0|0|
+|202602|7|5|4|2|3|2|0|1|0|0|1|0|2|0|0|1|0|0|0|0|
+|202603|10|11|4|2|1|3|0|1|0|3|3|1|1|0|0|0|0|1|0|1|
+|202604|14|10|0|2|2|0|2|0|0|0|1|1|3|1|2|0|1|0|0|0|
+|202605|24|13|6|2|0|0|4|0|0|1|0|0|0|0|0|0|0|0|0|0|
+|202606|5|14|2|2|0|1|0|1|0|1|0|0|0|0|0|0|0|0|0|0|
+|202607|0|7|1|1|1|1|2|1|0|0|0|1|0|0|0|0|0|0|0|0|
+|202608|12|1|3|2|1|1|0|1|0|2|0|0|0|0|1|1|0|0|0|0|
+
+<!-- STATS:END -->

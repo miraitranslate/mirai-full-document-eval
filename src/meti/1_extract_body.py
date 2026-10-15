@@ -25,6 +25,19 @@ def extract_date(html: BeautifulSoup) -> str:
     return date_text
 
 
+WRAPPER_CLASSES: frozenset[str] = frozenset({'textArea'})
+
+
+def _content_children(main: Tag) -> list[HTML_TAG]:
+    children: list[HTML_TAG] = []
+    for element in main.children:
+        if isinstance(element, Tag) and element.name == 'div' and WRAPPER_CLASSES & set(element.get('class') or []):
+            children.extend(element.children)
+        else:
+            children.append(element)
+    return children
+
+
 def extract_main_text(html: BeautifulSoup) -> list[str]:
     """Extract the main text content from the HTML."""
     paragraphs: list[str] = []
@@ -37,7 +50,7 @@ def extract_main_text(html: BeautifulSoup) -> list[str]:
     # iterate each element, and if it is <p> or <div class="border_box">, extract text
     text_stack: list[str] = []
     element: HTML_TAG
-    for element in main.children:
+    for element in _content_children(main):
         text: str = ''
         if element.name == 'p':
             text = element.get_text('', strip=True)
@@ -139,6 +152,10 @@ def main(input_tsv: Path, output_json: Path, html_directory: Path) -> None:
             continue
 
         ja_date: str = extract_date(ja_soup)
+        # 日付が取れないレコードはスキップする（fsa/kantei と統一）。
+        if not ja_date:
+            tqdm.write(f"日付抽出失敗 (skip): {item['id']}")
+            continue
 
         data.append({
             'id': item['id'],
